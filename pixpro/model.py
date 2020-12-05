@@ -1,4 +1,5 @@
 import random, math
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,8 +8,15 @@ import torch.nn.functional as F
 #process_group = torch.distributed.new_group(process_ids)
 #sync_bn_module = torch.nn.SyncBatchNorm.convert_sync_batchnorm(module, process_group)
 #TODO: Add device for pair_distance
-#TODO: Is PPM applied before or after resampling? Probably after right?
+#TODO: Is PPM applied before or after resampling? Probably after, right?
 #TODO: Test on GCP
+#TODO: Visualize some positive pairs to see if they make sense
+
+def to_mbs(tensor):
+    #product of shape
+    nfloats = np.prod(tensor.size())
+    nbytes = nfloats * 4
+    return nbytes / (1024 ** 2)
 
 def resample(image, crop_box):
     """
@@ -47,6 +55,55 @@ def pair_distance(view1_crop_box, view2_crop_box):
 
     #distance is simply sqrt(y^2 + x^2)
     return torch.sqrt(distance_y ** 2 + distance_x ** 2).transpose(1, 2) #(OH, TH, OW, TW)
+
+def positive_pairs(view1_crop_box, view2_crop_box, distance_thr=32):
+    """
+    Computes pairwise distances between all pixels in view1
+    and view2.
+    """
+
+    #TODO create the distance matrix on device?
+    oy1, ox1, oy2, ox2 = view1_crop_box
+    ty1, tx1, ty2, tx2 = view2_crop_box
+
+    #calculate pairwise y and x distances
+    view1_y = torch.arange(oy1, oy2, dtype=torch.float32)[:, None] #(OH, 1)
+    view2_y = torch.arange(ty1, ty2, dtype=torch.float32)[None, :] #(1, TH)
+    distance_y = view1_y - view2_y #(OH, TH)
+
+    view1_x = torch.arange(ox1, ox2, dtype=torch.float32)[:, None] #(OW, 1)
+    view2_x = torch.arange(tx1, tx2, dtype=torch.float32)[None, :] #(1, TW)
+    distance_x = view1_x - view2_x #(OW, TW)
+
+    #immediately rule out pairs where x or y distance
+    #is greater than the distance_thr
+    #possible_pos1h = torch.where(distance_y < distance_thr)[0]
+    #possible_pos1w = torch.where(distance_x < distance_thr)[0]
+    #print(len(possible_pos1h), len(possible_pos1w))
+
+    #calculate the actual distances between possible pairs
+    ncols = view1_x.size(0)
+    v1_flat_locs = []#torch.zeros((len(possible_pos1h) * len(possible_pos1w),))
+    v2_matches = []
+    v1h, v1w = view1_y.size(0), view1_x.size(0)
+    for j1 in range(v1h):
+        for i1 in range(v1w):
+            loc = (j1 * ncols - 1) + (i1 + 1)
+            v2_distances = torch.sqrt(distance_y[j1, :, None] ** 2 + distance_x[i1, None, :] ** 2)
+            v2_distances_flat = v2_distances.reshape(-1)
+            v2_indices = torch.where(v2_distances_flat < distance_thr)[0]
+
+            if len(v2_indices) > 0:
+                v1_flat_locs.append(loc)
+                v2_matches.append(v2_indices)
+
+
+    #expand the distance matrices for broadcasting
+    #distance_y = distance_y[:, :, None, None] #(OH, TH, 1, 1)
+    #distance_x = distance_x[None, None, :, :] #(1, 1, OW, TW)
+
+    #distance is simply sqrt(y^2 + x^2)
+    return v1_flat_locs, v2_matches
 
 #create a function to extract two crops from
 #an image batch (B, C, H, W)
@@ -132,7 +189,7 @@ class CutoutViews(nn.Module):
         ymax = min(oy2, ty2)
         xmax = min(ox2, tx2)
         overlap = (ymax - ymin) * (xmax - xmin)
-        print(f'batch overlap: {overlap / (self.height * self.width)}')
+        #print(f'batch overlap: {overlap / (self.height * self.width)}')
 
         #apply the crops
         view1 = view1[..., oy1:oy2, ox1:ox2]
@@ -248,10 +305,9 @@ class PixPro(nn.Module):
 
         #calculate the pairwise_distances
         #(view1_h, view1_w, view2_h, view2_w)
-        distances = pair_distance(v1_box, v2_box)
+        #distances = pair_distance(v1_box, v2_box)
 
         #pass each view through each encoder
-        #ppm applied to output of propagation encoder
         y = self.ppm(self.encoder(view1))
         yp = self.ppm(self.encoder(view2))
 
@@ -265,9 +321,9 @@ class PixPro(nn.Module):
         yp = resample(yp, v2_box)
         z = resample(z, v1_box)
         zp = resample(zp, v2_box)
-        #print(y.size(), yp.size(), z.size(), zp.size())
+        #print(to_mbs(y) + to_mbs(yp) + to_mbs(z) + to_mbs(y))
 
-        return y, yp, z, zp, view1, view2, distances
+        return y, yp, z, zp, view1, view2, v1_box, v2_box
 
 class ConsistencyLoss(nn.Module):
     def __init__(self, distance_thr=0.7*45):
@@ -278,6 +334,15 @@ class ConsistencyLoss(nn.Module):
     def forward(self, y, yp, z, zp, distances):
         #view1_shape = (H1, W1)
         #view2_shape = (H2, W2)
+        H1, W1, H2, W2 = distances.size()
+        distances = distances.reshape(H1 * W1, H2 * W2)
+        #positive_mask = distances < self.distance_thr
+        v1_pos, v2_pos = torch.where(distances < self.distance_thr)
+        del distances
+
+        #no positive pairs (should be rare)
+        if len(v1_pos) == 0:
+            return None
 
         #(B, C, H1 * W1) or (B, C, H2 * W2)
         y = y.flatten(2, -1)
@@ -285,14 +350,17 @@ class ConsistencyLoss(nn.Module):
         z = z.flatten(2, -1)
         zp = zp.flatten(2, -1)
 
-        #(B, C, H1 * W1, 1) x (B, C, 1, H2 * W2)
-        cos_y_zp = self.cosine_sim(y[..., None], zp[..., None, :]) #(B, C, H1 * W1, H2 * W2)
-        cos_yp_z = self.cosine_sim(z[..., None], yp[..., None, :]) #(B, C, H1 * W1, H2 * W2)
+        #TODO: make this non-loopy without using too much memory?
+        bsz = y.size(0)
+        lpix = torch.zeros((bsz,))
+        for v1_index in torch.unique(v1_pos):
+            v2_indices = v2_pos[v1_pos == v1_index] #(k,)
 
-        H1, W1, H2, W2 = distances.size()
-        distances = distances.reshape(H1 * W1, H2 * W2)
-        positive_mask = distances < self.distance_thr
+            #(B, C, 1) x (B, C, k) --> (B, k)
+            cos_y_zp = (self.cosine_sim(y[..., v1_index][..., None],  zp[..., v2_indices]))
+            cos_z_yp = (self.cosine_sim(z[..., v1_index][..., None],  yp[..., v2_indices]))
+            lpix += (-1 * (cos_y_zp + cos_z_yp)).sum(-1) #(B,)
 
-        lpix = -1 * (cos_y_zp.masked_select(positive_mask) + cos_yp_z.masked_select(positive_mask))
-
-        return lpix.mean()
+        #average by total positives per image
+        #then over the batch
+        return (lpix / len(v2_pos)).mean() #lpix.mean()
