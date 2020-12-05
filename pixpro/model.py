@@ -12,12 +12,6 @@ import torch.nn.functional as F
 #TODO: Test on GCP
 #TODO: Visualize some positive pairs to see if they make sense
 
-def to_mbs(tensor):
-    #product of shape
-    nfloats = np.prod(tensor.size())
-    nbytes = nfloats * 4
-    return nbytes / (1024 ** 2)
-
 def resample(image, crop_box):
     """
     Resizes (warps) a cropped view to its original size in the image
@@ -30,36 +24,25 @@ def resample(image, crop_box):
     #together with PPM does bilinear make representations too smooth?
     return F.interpolate(image, size=(crop_height, crop_width), mode='bilinear', align_corners=True)
 
-def pair_distance(view1_crop_box, view2_crop_box):
+def ravel_index(row, col, ncols):
     """
-    Computes pairwise distances between all pixels in view1
-    and view2.
+    Like the numpy function (sort of)
     """
+    return (row * ncols - 1) + (col + 1)
 
-    #TODO create the distance matrix on device?
-    oy1, ox1, oy2, ox2 = view1_crop_box
-    ty1, tx1, ty2, tx2 = view2_crop_box
-
-    #calculate pairwise y and x distances
-    view1_y = torch.arange(oy1, oy2, dtype=torch.float32)[:, None] #(OH, 1)
-    view2_y = torch.arange(ty1, ty2, dtype=torch.float32)[None, :] #(1, TH)
-    distance_y = view1_y - view2_y #(OH, TH)
-
-    view1_x = torch.arange(ox1, ox2, dtype=torch.float32)[:, None] #(OW, 1)
-    view2_x = torch.arange(tx1, tx2, dtype=torch.float32)[None, :] #(1, TW)
-    distance_x = view1_x - view2_x #(OW, TW)
-
-    #expand the distance matrices for broadcasting
-    distance_y = distance_y[:, :, None, None] #(OH, TH, 1, 1)
-    distance_x = distance_x[None, None, :, :] #(1, 1, OW, TW)
-
-    #distance is simply sqrt(y^2 + x^2)
-    return torch.sqrt(distance_y ** 2 + distance_x ** 2).transpose(1, 2) #(OH, TH, OW, TW)
-
-def positive_pairs(view1_crop_box, view2_crop_box, distance_thr=32):
+def positive_pairs(view1_crop_box, view2_crop_box, distance_thr=32, device='cpu'):
     """
-    Computes pairwise distances between all pixels in view1
-    and view2.
+    Finds positives pairs of pixels within the 2 given views. A
+    positive pair is any pair within distance_thr of each other.
+
+    Returns:
+    --------
+    view1_raveled_indices: List of indices for the raveled version
+    of view1. Each item is a single index.
+
+    view2_positive_pairs: List of indices in view2 that are positive
+    matches for each pixel in view1_raveled_indices. Each item has
+    at least 1 element.
     """
 
     #TODO create the distance matrix on device?
@@ -67,43 +50,34 @@ def positive_pairs(view1_crop_box, view2_crop_box, distance_thr=32):
     ty1, tx1, ty2, tx2 = view2_crop_box
 
     #calculate pairwise y and x distances
-    view1_y = torch.arange(oy1, oy2, dtype=torch.float32)[:, None] #(OH, 1)
-    view2_y = torch.arange(ty1, ty2, dtype=torch.float32)[None, :] #(1, TH)
+    view1_y = torch.arange(oy1, oy2, dtype=torch.float32, device=device)[:, None] #(OH, 1)
+    view2_y = torch.arange(ty1, ty2, dtype=torch.float32, device=device)[None, :] #(1, TH)
     distance_y = view1_y - view2_y #(OH, TH)
 
-    view1_x = torch.arange(ox1, ox2, dtype=torch.float32)[:, None] #(OW, 1)
-    view2_x = torch.arange(tx1, tx2, dtype=torch.float32)[None, :] #(1, TW)
+    view1_x = torch.arange(ox1, ox2, dtype=torch.float32, device=device)[:, None] #(OW, 1)
+    view2_x = torch.arange(tx1, tx2, dtype=torch.float32, device=device)[None, :] #(1, TW)
     distance_x = view1_x - view2_x #(OW, TW)
-
-    #immediately rule out pairs where x or y distance
-    #is greater than the distance_thr
-    #possible_pos1h = torch.where(distance_y < distance_thr)[0]
-    #possible_pos1w = torch.where(distance_x < distance_thr)[0]
-    #print(len(possible_pos1h), len(possible_pos1w))
 
     #calculate the actual distances between possible pairs
-    ncols = view1_x.size(0)
-    v1_flat_locs = []#torch.zeros((len(possible_pos1h) * len(possible_pos1w),))
-    v2_matches = []
     v1h, v1w = view1_y.size(0), view1_x.size(0)
-    for j1 in range(v1h):
-        for i1 in range(v1w):
-            loc = (j1 * ncols - 1) + (i1 + 1)
-            v2_distances = torch.sqrt(distance_y[j1, :, None] ** 2 + distance_x[i1, None, :] ** 2)
-            v2_distances_flat = v2_distances.reshape(-1)
-            v2_indices = torch.where(v2_distances_flat < distance_thr)[0]
+    v2w = view2_x.size(1)
+    v1_raveled_index = []
+    v2_positive_matches = []
+    for i in range(v1w):
+        for j in range(v1h):
+            #(TH, 1) + (1, WH) --> (TH, WH)
+            v2_distances = torch.sqrt(
+                distance_y[j, :, None] ** 2 + distance_x[i, None, :] ** 2
+            )
+            v2_raveled_indices = torch.where(v2_distances < distance_thr)
 
-            if len(v2_indices) > 0:
-                v1_flat_locs.append(loc)
-                v2_matches.append(v2_indices)
+            if len(v2_raveled_indices[0]) > 0:
+                index = ravel_index(j, i, v1w)
+                v1_raveled_index.append(index)
+                v2_raveled_indices = ravel_index(*v2_raveled_indices, v2w)
+                v2_positive_matches.append(v2_raveled_indices)
 
-
-    #expand the distance matrices for broadcasting
-    #distance_y = distance_y[:, :, None, None] #(OH, TH, 1, 1)
-    #distance_x = distance_x[None, None, :, :] #(1, 1, OW, TW)
-
-    #distance is simply sqrt(y^2 + x^2)
-    return v1_flat_locs, v2_matches
+    return v1_raveled_index, v2_positive_matches
 
 #create a function to extract two crops from
 #an image batch (B, C, H, W)
@@ -271,7 +245,8 @@ class PixPro(nn.Module):
         crop_size=(224, 224),
         gamma=2,
         ppm_layers=1,
-        momentum=0.99
+        momentum=0.99,
+        distance_thr=32
     ):
         super(PixPro, self).__init__()
 
@@ -289,8 +264,8 @@ class PixPro(nn.Module):
             mom_param.requires_grad = False
 
         self.cutout = CutoutViews(*crop_size)
-
         self.momentum = momentum
+        self.distance_thr = distance_thr
         #momentum = 1 − (1 − momentum) * (cos(pi * k / K) + 1) / 2 #k current step
 
     @torch.no_grad()
@@ -302,10 +277,6 @@ class PixPro(nn.Module):
     def forward(self, view1, view2):
         #crop the two views
         view1, view2, v1_box, v2_box = self.cutout(view1, view2)
-
-        #calculate the pairwise_distances
-        #(view1_h, view1_w, view2_h, view2_w)
-        #distances = pair_distance(v1_box, v2_box)
 
         #pass each view through each encoder
         y = self.ppm(self.encoder(view1))
@@ -321,9 +292,12 @@ class PixPro(nn.Module):
         yp = resample(yp, v2_box)
         z = resample(z, v1_box)
         zp = resample(zp, v2_box)
-        #print(to_mbs(y) + to_mbs(yp) + to_mbs(z) + to_mbs(y))
 
-        return y, yp, z, zp, view1, view2, v1_box, v2_box
+        #determine pairs of pixels to evaluate consistency loss
+        v1_indices, v2_pairs = \
+        positive_pairs(v1_box, v2_box, self.distance_thr, y.device)
+
+        return y, yp, z, zp, view1, view2, v1_box, v2_box, v1_indices, v2_pairs
 
 class ConsistencyLoss(nn.Module):
     def __init__(self, distance_thr=0.7*45):
