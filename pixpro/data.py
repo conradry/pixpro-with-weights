@@ -3,7 +3,7 @@ import cv2
 from torch.utils.data import Dataset
 
 class ContrastData(Dataset):
-    def __init__(self, imdir, view1_tfs, view2_tfs=None):
+    def __init__(self, imdir, crop_tf, view1_tfs, view2_tfs=None):
         super(ContrastData, self).__init__()
 
         #list the images in the imdir
@@ -13,6 +13,8 @@ class ContrastData(Dataset):
 
         #transforms in color/image space only
         #no crops!!!
+        self.crop_tf = crop_tf
+
         self.view1_tfs = view1_tfs
         self.view2_tfs = view2_tfs
 
@@ -22,6 +24,8 @@ class ContrastData(Dataset):
     def __getitem__(self, idx):
         fpath = os.path.join(self.imdir, self.fnames[idx])
         image = cv2.imread(fpath)
+
+        image = self.crop_tf(image=image)['image']
 
         #two independent transforms
         view1 = self.view1_tfs(image=image)['image']

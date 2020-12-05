@@ -6,6 +6,9 @@ import torch.nn.functional as F
 #TODO: For syncbatchnorm
 #process_group = torch.distributed.new_group(process_ids)
 #sync_bn_module = torch.nn.SyncBatchNorm.convert_sync_batchnorm(module, process_group)
+#TODO: Add device for pair_distance
+#TODO: Is PPM applied before or after resampling? Probably after right?
+#TODO: Test on GCP
 
 def resample(image, crop_box):
     """
@@ -84,10 +87,11 @@ class CutoutViews(nn.Module):
                 j = random.randint(0, image_width - w)
                 h_start = i * 1.0 / (image_height - h + 1e-10)
                 w_start = j * 1.0 / (image_width - w + 1e-10)
-                y1 = max(0, int((image_height - self.height) * h_start))
-                y2 = min(y1 + self.height, image_height - 1)
-                x1 = max(0, int((image_width - self.width) * w_start))
-                x2 = min(x1 + self.width, image_width - 1)
+
+                y1 = max(0, int((image_height - h) * h_start))
+                y2 = min(y1 + h, image_height - 1)
+                x1 = max(0, int((image_width - w) * w_start))
+                x2 = min(x1 + w, image_width - 1)
                 return y1, x1, y2, x2
 
         # Fallback to central crop
@@ -244,7 +248,7 @@ class PixPro(nn.Module):
 
         #calculate the pairwise_distances
         #(view1_h, view1_w, view2_h, view2_w)
-        #distances = pair_distance(xbox, xpbox)
+        distances = pair_distance(v1_box, v2_box)
 
         #pass each view through each encoder
         #ppm applied to output of propagation encoder
@@ -257,16 +261,17 @@ class PixPro(nn.Module):
 
         #resample (warp) views back to their sizes
         #in the original image space
-        y = resample(y, xbox)
-        yp = resample(yp, xpbox)
-        z = resample(z, xbox)
-        zp = resample(zp, xpbox)
+        y = resample(y, v1_box)
+        yp = resample(yp, v2_box)
+        z = resample(z, v1_box)
+        zp = resample(zp, v2_box)
         #print(y.size(), yp.size(), z.size(), zp.size())
 
-        return y, yp, z, zp, view1, view2, v1_box, v2_box
+        return y, yp, z, zp, view1, view2, distances
 
 class ConsistencyLoss(nn.Module):
     def __init__(self, distance_thr=0.7*45):
+        super(ConsistencyLoss, self).__init__()
         self.distance_thr = distance_thr
         self.cosine_sim = nn.CosineSimilarity(dim=1)
 
