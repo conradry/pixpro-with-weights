@@ -234,6 +234,7 @@ class Encoder(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv2d(projection_nin, 256, 1)
         )
+        #self.projection = nn.Identity()
 
     def forward(self, x):
         x = self.backbone(x)
@@ -326,7 +327,7 @@ class ConsistencyLoss(nn.Module):
 
         #TODO: make this non-loopy without using too much memory?
         bsz = y.size(0)
-        lpix = torch.zeros((bsz,))
+        lpix = torch.zeros((bsz,), dtype=torch.float32, device=y.device)
         total_positives = 0
         for v1_index, v2_pairs in tqdm(zip(view1_indices, view2_pairs), total=len(view1_indices)):
             #(B, C, 1) x (B, C, k) --> (B, k)
