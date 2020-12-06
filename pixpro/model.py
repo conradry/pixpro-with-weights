@@ -3,14 +3,15 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from tqdm import tqdm
 
 #TODO: For syncbatchnorm
 #process_group = torch.distributed.new_group(process_ids)
 #sync_bn_module = torch.nn.SyncBatchNorm.convert_sync_batchnorm(module, process_group)
-#TODO: Add device for pair_distance
-#TODO: Is PPM applied before or after resampling? Probably after, right?
+#TODO: Is PPM applied before or after resampling? Feels like it should be after
+#run tests. If can't replicate the results this is the first thing to change
+
 #TODO: Test on GCP
-#TODO: Visualize some positive pairs to see if they make sense
 
 def resample(image, crop_box):
     """
@@ -246,7 +247,8 @@ class PixPro(nn.Module):
         gamma=2,
         ppm_layers=1,
         momentum=0.99,
-        distance_thr=32
+        distance_thr=32,
+        debugging=False
     ):
         super(PixPro, self).__init__()
 
@@ -266,6 +268,7 @@ class PixPro(nn.Module):
         self.cutout = CutoutViews(*crop_size)
         self.momentum = momentum
         self.distance_thr = distance_thr
+        self.debugging = debugging
         #momentum = 1 − (1 − momentum) * (cos(pi * k / K) + 1) / 2 #k current step
 
     @torch.no_grad()
@@ -297,25 +300,22 @@ class PixPro(nn.Module):
         v1_indices, v2_pairs = \
         positive_pairs(v1_box, v2_box, self.distance_thr, y.device)
 
-        return y, yp, z, zp, view1, view2, v1_box, v2_box, v1_indices, v2_pairs
+        if self.debugging:
+            return y, yp, z, zp, view1, view2, v1_box, v2_box, v1_indices, v2_pairs
+        else:
+            return y, yp, z, zp, v1_indices, v2_pairs
+
 
 class ConsistencyLoss(nn.Module):
-    def __init__(self, distance_thr=0.7*45):
+    def __init__(self):
         super(ConsistencyLoss, self).__init__()
-        self.distance_thr = distance_thr
         self.cosine_sim = nn.CosineSimilarity(dim=1)
 
-    def forward(self, y, yp, z, zp, distances):
-        #view1_shape = (H1, W1)
-        #view2_shape = (H2, W2)
-        H1, W1, H2, W2 = distances.size()
-        distances = distances.reshape(H1 * W1, H2 * W2)
-        #positive_mask = distances < self.distance_thr
-        v1_pos, v2_pos = torch.where(distances < self.distance_thr)
-        del distances
-
+    def forward(self, y, yp, z, zp, view1_indices, view2_pairs):
+        #y, z: (B, C, H1, W1): view1
+        #yp, zp: (B, C, H2, W2): view2
         #no positive pairs (should be rare)
-        if len(v1_pos) == 0:
+        if len(view1_indices) == 0:
             return None
 
         #(B, C, H1 * W1) or (B, C, H2 * W2)
@@ -327,14 +327,14 @@ class ConsistencyLoss(nn.Module):
         #TODO: make this non-loopy without using too much memory?
         bsz = y.size(0)
         lpix = torch.zeros((bsz,))
-        for v1_index in torch.unique(v1_pos):
-            v2_indices = v2_pos[v1_pos == v1_index] #(k,)
-
+        total_positives = 0
+        for v1_index, v2_pairs in tqdm(zip(view1_indices, view2_pairs), total=len(view1_indices)):
             #(B, C, 1) x (B, C, k) --> (B, k)
-            cos_y_zp = (self.cosine_sim(y[..., v1_index][..., None],  zp[..., v2_indices]))
-            cos_z_yp = (self.cosine_sim(z[..., v1_index][..., None],  yp[..., v2_indices]))
+            cos_y_zp = (self.cosine_sim(y[..., v1_index][..., None],  zp[..., v2_pairs]))
+            cos_z_yp = (self.cosine_sim(z[..., v1_index][..., None],  yp[..., v2_pairs]))
             lpix += (-1 * (cos_y_zp + cos_z_yp)).sum(-1) #(B,)
+            total_positives += len(v2_pairs)
 
         #average by total positives per image
         #then over the batch
-        return (lpix / len(v2_pos)).mean() #lpix.mean()
+        return (lpix / total_positives).mean()
