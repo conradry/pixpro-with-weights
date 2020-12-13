@@ -1,181 +1,14 @@
-import random, math
+import random, math, sys
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
+from copy import deepcopy
 
 #TODO: For syncbatchnorm
 #process_group = torch.distributed.new_group(process_ids)
 #sync_bn_module = torch.nn.SyncBatchNorm.convert_sync_batchnorm(module, process_group)
-#TODO: Is PPM applied before or after resampling? Feels like it should be after
-#run tests. If can't replicate the results this is the first thing to change
-
-#TODO: Test on GCP
-
-def resample(image, crop_box):
-    """
-    Resizes (warps) a cropped view to its original size in the image
-    """
-    y1, x1, y2, x2 = crop_box
-    crop_height = y2 - y1
-    crop_width = x2 - x1
-
-    #TODO: should it be bilinear or nearest here?
-    #together with PPM does bilinear make representations too smooth?
-    return F.interpolate(image, size=(crop_height, crop_width), mode='bilinear', align_corners=True)
-
-def ravel_index(row, col, ncols):
-    """
-    Like the numpy function (sort of)
-    """
-    return (row * ncols - 1) + (col + 1)
-
-def positive_pairs(view1_crop_box, view2_crop_box, distance_thr=32, device='cpu'):
-    """
-    Finds positives pairs of pixels within the 2 given views. A
-    positive pair is any pair within distance_thr of each other.
-
-    Returns:
-    --------
-    view1_raveled_indices: List of indices for the raveled version
-    of view1. Each item is a single index.
-
-    view2_positive_pairs: List of indices in view2 that are positive
-    matches for each pixel in view1_raveled_indices. Each item has
-    at least 1 element.
-    """
-
-    #TODO create the distance matrix on device?
-    oy1, ox1, oy2, ox2 = view1_crop_box
-    ty1, tx1, ty2, tx2 = view2_crop_box
-
-    #calculate pairwise y and x distances
-    view1_y = torch.arange(oy1, oy2, dtype=torch.float32, device=device)[:, None] #(OH, 1)
-    view2_y = torch.arange(ty1, ty2, dtype=torch.float32, device=device)[None, :] #(1, TH)
-    distance_y = view1_y - view2_y #(OH, TH)
-
-    view1_x = torch.arange(ox1, ox2, dtype=torch.float32, device=device)[:, None] #(OW, 1)
-    view2_x = torch.arange(tx1, tx2, dtype=torch.float32, device=device)[None, :] #(1, TW)
-    distance_x = view1_x - view2_x #(OW, TW)
-
-    #calculate the actual distances between possible pairs
-    v1h, v1w = view1_y.size(0), view1_x.size(0)
-    v2w = view2_x.size(1)
-    v1_raveled_index = []
-    v2_positive_matches = []
-    for i in range(v1w):
-        for j in range(v1h):
-            #(TH, 1) + (1, WH) --> (TH, WH)
-            v2_distances = torch.sqrt(
-                distance_y[j, :, None] ** 2 + distance_x[i, None, :] ** 2
-            )
-            v2_raveled_indices = torch.where(v2_distances < distance_thr)
-
-            if len(v2_raveled_indices[0]) > 0:
-                index = ravel_index(j, i, v1w)
-                v1_raveled_index.append(index)
-                v2_raveled_indices = ravel_index(*v2_raveled_indices, v2w)
-                v2_positive_matches.append(v2_raveled_indices)
-
-    return v1_raveled_index, v2_positive_matches
-
-#create a function to extract two crops from
-#an image batch (B, C, H, W)
-class CutoutViews(nn.Module):
-    def __init__(
-        self,
-        height,
-        width,
-        scale=(0.08, 1.0),
-        ratio=(0.75, 1.3333333333333333),
-        interp='bilinear',
-        align_corners=True
-    ):
-        super(CutoutViews, self).__init__()
-
-        self.height = height
-        self.width = width
-        self.scale = scale
-        self.ratio = ratio
-
-        #create the interpolator
-        self.upsample = nn.Upsample(size=(height, width), mode=interp, align_corners=align_corners)
-
-    def get_crop_parameters(self, image_height, image_width):
-        #a copy from albumentations with some small modifications
-        area = image_height * image_width
-
-        for _attempt in range(10):
-            target_area = random.uniform(*self.scale) * area
-            log_ratio = (math.log(self.ratio[0]), math.log(self.ratio[1]))
-            aspect_ratio = math.exp(random.uniform(*log_ratio))
-
-            w = int(round(math.sqrt(target_area * aspect_ratio)))
-            h = int(round(math.sqrt(target_area / aspect_ratio)))
-
-            if 0 < w <= image_width and 0 < h <= image_height:
-                i = random.randint(0, image_height - h)
-                j = random.randint(0, image_width - w)
-                h_start = i * 1.0 / (image_height - h + 1e-10)
-                w_start = j * 1.0 / (image_width - w + 1e-10)
-
-                y1 = max(0, int((image_height - h) * h_start))
-                y2 = min(y1 + h, image_height - 1)
-                x1 = max(0, int((image_width - w) * w_start))
-                x2 = min(x1 + w, image_width - 1)
-                return y1, x1, y2, x2
-
-        # Fallback to central crop
-        in_ratio = image_width / image_height
-        if in_ratio < min(self.ratio):
-            w = image_width
-            h = int(round(w / min(self.ratio)))
-        elif in_ratio > max(self.ratio):
-            h = image_height
-            w = int(round(h * max(self.ratio)))
-        else:  # whole image
-            w = image_width
-            h = image_height
-        i = (image_height - h) // 2
-        j = (image_width - w) // 2
-
-        h_start = i * 1.0 / (image_height - h + 1e-10)
-        w_start = j * 1.0 / (image_width - w + 1e-10)
-        y1 = max(0, int((image_height - self.height) * h_start))
-        y2 = min(y1 + self.height, image_height - 1)
-        x1 = max(0, int((image_width - self.width) * w_start))
-        x2 = min(x1 + self.width, image_width - 1)
-        return y1, x1, y2, x2
-
-    def forward(self, view1, view2):
-        #while the crops are randomly chosen, they are applied
-        #uniformly across all images, this keeps all the tensors
-        #in nice evenly sized blocks that we can manage more easily
-
-        assert(view1.shape == view2.shape), "view1 and view2 have different shapes!"
-        image_height, image_width = view1.size()[2:]
-        oy1, ox1, oy2, ox2 = self.get_crop_parameters(image_height, image_width)
-        ty1, tx1, ty2, tx2 = self.get_crop_parameters(image_height, image_width)
-
-        #calculate the overlap between the boxes
-        ymin = max(oy1, ty1)
-        xmin = max(ox1, tx1)
-        ymax = min(oy2, ty2)
-        xmax = min(ox2, tx2)
-        overlap = (ymax - ymin) * (xmax - xmin)
-        #print(f'batch overlap: {overlap / (self.height * self.width)}')
-
-        #apply the crops
-        view1 = view1[..., oy1:oy2, ox1:ox2]
-        view2 = view2[..., ty1:ty2, tx1:tx2]
-
-        #resize back to original image shape to get
-        #two tensors of (B, C, H, W)
-        view1 = self.upsample(view1)
-        view2 = self.upsample(view2)
-
-        return view1, view2, (oy1, ox1, oy2, ox2), (ty1, tx1, ty2, tx2)
 
 class PPM(nn.Module):
     def __init__(self, nin, gamma=2, nlayers=1):
@@ -234,7 +67,6 @@ class Encoder(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv2d(projection_nin, 256, 1)
         )
-        #self.projection = nn.Identity()
 
     def forward(self, x):
         x = self.backbone(x)
@@ -244,32 +76,27 @@ class PixPro(nn.Module):
     def __init__(
         self,
         backbone,
-        crop_size=(224, 224),
-        gamma=2,
         ppm_layers=1,
         momentum=0.99,
-        distance_thr=32,
-        debugging=False
+        downsampling=32
     ):
         super(PixPro, self).__init__()
 
         #create the encoder and momentum encoder
         self.encoder = Encoder(backbone)
-        self.mom_encoder = Encoder(backbone)
+        self.mom_encoder = deepcopy(self.encoder)
 
         #hardcoded: encoder outputs 256
         self.ppm = PPM(256)
 
         #copy parameters from the encoder to momentum encoder
         #and turn off gradients
-        for param, mom_param in zip(self.encoder.parameters(), self.mom_encoder.parameters()):
-            mom_param.data.copy_(param.data)
-            mom_param.requires_grad = False
+        for param in self.mom_encoder.parameters():
+            param.requires_grad = False
 
-        self.cutout = CutoutViews(*crop_size)
+        self.grid_downsample = nn.AvgPool2d(downsampling, stride=downsampling)
+
         self.momentum = momentum
-        self.distance_thr = distance_thr
-        self.debugging = debugging
         #momentum = 1 − (1 − momentum) * (cos(pi * k / K) + 1) / 2 #k current step
 
     @torch.no_grad()
@@ -278,64 +105,66 @@ class PixPro(nn.Module):
             mom_param.data = mom_param.data * self.momentum + param.data * (1. - self.momentum)
 
 
-    def forward(self, view1, view2):
-        #crop the two views
-        view1, view2, v1_box, v2_box = self.cutout(view1, view2)
-
+    def forward(self, view1, view2, view1_grid, view2_grid):
         #pass each view through each encoder
-        y = self.ppm(self.encoder(view1))
-        yp = self.ppm(self.encoder(view2))
+        y1 = self.ppm(self.encoder(view1))
+        y2 = self.ppm(self.encoder(view2))
 
         with torch.no_grad():
-            z = self.mom_encoder(view1)
-            zp = self.mom_encoder(view2)
+            z1 = self.mom_encoder(view1)
+            z2 = self.mom_encoder(view2)
 
-        #resample (warp) views back to their sizes
-        #in the original image space
-        y = resample(y, v1_box)
-        yp = resample(yp, v2_box)
-        z = resample(z, v1_box)
-        zp = resample(zp, v2_box)
+        view1_grid = self.grid_downsample(view1_grid)
+        view2_grid = self.grid_downsample(view2_grid)
 
-        #determine pairs of pixels to evaluate consistency loss
-        v1_indices, v2_pairs = \
-        positive_pairs(v1_box, v2_box, self.distance_thr, y.device)
+        return y1, y2, z1, z2, view1_grid, view2_grid
 
-        if self.debugging:
-            return y, yp, z, zp, view1, view2, v1_box, v2_box, v1_indices, v2_pairs
-        else:
-            return y, yp, z, zp, v1_indices, v2_pairs
+def grid_distances(grid1, grid2):
+    #grid: (B, 2, H, W) --> (B, 2, H * W)
+    h, w = grid1.size()[-2:]
+    grid1 = grid1.flatten(2, -1)[..., :, None] #(B, 2, H * W, 1)
+    grid2 = grid2.flatten(2, -1)[..., None, :] #(B, 2, 1, H * W)
+
+    y_distances = grid1[:, 0] - grid2[:, 0]
+    x_distances = grid1[:, 1] - grid2[:, 1]
+
+    return torch.sqrt(y_distances ** 2 + x_distances ** 2)
 
 
 class ConsistencyLoss(nn.Module):
-    def __init__(self):
+    def __init__(self, distance_thr=0.7):
         super(ConsistencyLoss, self).__init__()
+        self.distance_thr = distance_thr
         self.cosine_sim = nn.CosineSimilarity(dim=1)
 
-    def forward(self, y, yp, z, zp, view1_indices, view2_pairs):
-        #y, z: (B, C, H1, W1): view1
-        #yp, zp: (B, C, H2, W2): view2
-        #no positive pairs (should be rare)
-        if len(view1_indices) == 0:
-            return None
+    def forward(self, y1, y2, z1, z2, view1_grid, view2_grid):
+        #(B, C, H * W)
+        y1 = y1.flatten(2, -1)
+        y2 = y2.flatten(2, -1)
+        z1 = z1.flatten(2, -1)
+        z2 = z2.flatten(2, -1)
 
-        #(B, C, H1 * W1) or (B, C, H2 * W2)
-        y = y.flatten(2, -1)
-        yp = yp.flatten(2, -1)
-        z = z.flatten(2, -1)
-        zp = zp.flatten(2, -1)
+        #pairwise distances between grid coordinates
+        #(B, C, H * W, H * W)
+        distances = grid_distances(view1_grid, view2_grid)
 
-        #TODO: make this non-loopy without using too much memory?
-        bsz = y.size(0)
-        lpix = torch.zeros((bsz,), dtype=torch.float32, device=y.device)
-        total_positives = 0
-        for v1_index, v2_pairs in tqdm(zip(view1_indices, view2_pairs), total=len(view1_indices)):
-            #(B, C, 1) x (B, C, k) --> (B, k)
-            cos_y_zp = (self.cosine_sim(y[..., v1_index][..., None],  zp[..., v2_pairs]))
-            cos_z_yp = (self.cosine_sim(z[..., v1_index][..., None],  yp[..., v2_pairs]))
-            lpix += (-1 * (cos_y_zp + cos_z_yp)).sum(-1) #(B,)
-            total_positives += len(v2_pairs)
+        #determine normalization factors for view1 and view2
+        #(i.e. distance between "feature map bins")
+        view1_bin = torch.norm(view1_grid[..., 1, 1] - view1_grid[..., 0, 0], dim=-1)
+        view2_bin = torch.norm(view2_grid[..., 1, 1] - view2_grid[..., 0, 0], dim=-1)
 
-        #average by total positives per image
-        #then over the batch
-        return (lpix / total_positives).mean()
+        view1_distances = distances / view1_bin
+        view2_distances = distances / view2_bin
+
+        print(distances.size())
+
+        #compute similarity
+        view1_similarity = self.cosine_sim(y1[..., :, None], z2[..., None, :])
+        view1_mask = view1_distances <= self.distance_thr
+        view1_loss = view1_similarity.masked_select(view1_mask).mean()
+
+        view2_similarity = self.cosine_sim(y2[..., :, None], z1[..., None, :])
+        view2_mask = view2_distances <= self.distance_thr
+        view2_loss = view2_similarity.masked_select(view2_mask).mean()
+
+        return -1 * (view1_loss + view2_loss)
