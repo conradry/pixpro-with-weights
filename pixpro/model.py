@@ -153,11 +153,9 @@ class ConsistencyLoss(nn.Module):
         view1_bin = torch.norm(view1_grid[..., 1, 1] - view1_grid[..., 0, 0], dim=-1)
         view2_bin = torch.norm(view2_grid[..., 1, 1] - view2_grid[..., 0, 0], dim=-1)
 
-        view1_distances = distances / view1_bin
-        view2_distances = distances / view2_bin
-
-        print(distances.size())
-
+        view1_distances = distances / view1_bin[:, None, None]
+        view2_distances = distances / view2_bin[:, None, None]
+        
         #compute similarity
         view1_similarity = self.cosine_sim(y1[..., :, None], z2[..., None, :])
         view1_mask = view1_distances <= self.distance_thr

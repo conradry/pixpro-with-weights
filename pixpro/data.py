@@ -54,8 +54,6 @@ class ContrastData(Dataset):
         else:
             view2 = self.view1_color_tfs(image=view2)['image']
 
-        print(view1_grid.shape)
-
         output = {
             'fpath': fpath,
             'view1': view1,
