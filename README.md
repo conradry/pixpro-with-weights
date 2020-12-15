@@ -4,7 +4,8 @@ Unofficial implementation of the code in: [Propagate Yourself: Exploring Pixel-L
 
 ## Current Status
 
-Implementations of the dataloader, model and train_backbone script are presumably complete.
+Implementations of the dataloader, model and train_backbone script are presumably complete for Pixel Propagation only
+(not Pixel Contrast).
 
 Still left to do:
 
