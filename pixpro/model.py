@@ -155,7 +155,10 @@ class ConsistencyLoss(nn.Module):
 
         view1_distances = distances / view1_bin[:, None, None]
         view2_distances = distances / view2_bin[:, None, None]
-        
+
+        #TODO: average over pixel locations first then over images
+        #in the batch. Better for stable loss values?
+
         #compute similarity
         view1_similarity = self.cosine_sim(y1[..., :, None], z2[..., None, :])
         view1_mask = view1_distances <= self.distance_thr
