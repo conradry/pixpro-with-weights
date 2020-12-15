@@ -6,10 +6,6 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from copy import deepcopy
 
-#TODO: For syncbatchnorm
-#process_group = torch.distributed.new_group(process_ids)
-#sync_bn_module = torch.nn.SyncBatchNorm.convert_sync_batchnorm(module, process_group)
-
 class PPM(nn.Module):
     def __init__(self, nin, gamma=2, nlayers=1):
         super(PPM, self).__init__()
@@ -76,18 +72,20 @@ class PixPro(nn.Module):
     def __init__(
         self,
         backbone,
-        ppm_layers=1,
         momentum=0.99,
+        ppm_layers=1,
+        ppm_gamma=0.2,
         downsampling=32
     ):
         super(PixPro, self).__init__()
 
         #create the encoder and momentum encoder
+        backbone = backbone()
         self.encoder = Encoder(backbone)
         self.mom_encoder = deepcopy(self.encoder)
 
         #hardcoded: encoder outputs 256
-        self.ppm = PPM(256)
+        self.ppm = PPM(256, gamma=ppm_gamma, nlayers=ppm_layers)
 
         #copy parameters from the encoder to momentum encoder
         #and turn off gradients
@@ -100,7 +98,7 @@ class PixPro(nn.Module):
         #momentum = 1 − (1 − momentum) * (cos(pi * k / K) + 1) / 2 #k current step
 
     @torch.no_grad()
-    def update_mom_encoder(self):
+    def _update_mom_encoder(self):
         for param, mom_param in zip(self.encoder.parameters(), self.mom_encoder.parameters()):
             mom_param.data = mom_param.data * self.momentum + param.data * (1. - self.momentum)
 
@@ -111,6 +109,9 @@ class PixPro(nn.Module):
         y2 = self.ppm(self.encoder(view2))
 
         with torch.no_grad():
+            #update mom encoder before forward
+            self._update_mom_encoder()
+
             z1 = self.mom_encoder(view1)
             z2 = self.mom_encoder(view2)
 
@@ -156,10 +157,8 @@ class ConsistencyLoss(nn.Module):
         view1_distances = distances / view1_bin[:, None, None]
         view2_distances = distances / view2_bin[:, None, None]
 
-        #TODO: average over pixel locations first then over images
-        #in the batch. Better for stable loss values?
-
-        #compute similarity
+        #???average over pixel locations first then over images
+        #in the batch (B, H * W, H * W)???
         view1_similarity = self.cosine_sim(y1[..., :, None], z2[..., None, :])
         view1_mask = view1_distances <= self.distance_thr
         view1_loss = view1_similarity.masked_select(view1_mask).mean()
