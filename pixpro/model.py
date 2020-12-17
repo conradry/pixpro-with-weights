@@ -3,8 +3,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from tqdm import tqdm
 from copy import deepcopy
+from collections import OrderedDict
 
 class PPM(nn.Module):
     def __init__(self, nin, gamma=2, nlayers=1):
@@ -48,13 +48,16 @@ class PPM(nn.Module):
 class Encoder(nn.Module):
     def __init__(self, backbone):
         super(Encoder, self).__init__()
-
-        #strip off models fc layer (always last for torchvision models)
-        self.backbone = nn.Sequential(*list(backbone.children())[:-1])
-
-        #wonky way to get the numbers of channels in the output
-        #but it does work for pretty much any model
-        projection_nin = list(self.backbone.named_parameters())[-1][1].shape[0]
+        
+        #use ordered dict to retain layer names
+        #last two layers are avgpool and fc
+        layers = OrderedDict([layer for layer in backbone().named_children()][:-2])
+        self.backbone = nn.Sequential(layers)
+        
+        #get the number of channels from last convolution
+        for layer in self.backbone.modules():
+            if isinstance(layer, nn.Conv2d):
+                projection_nin = layer.out_channels
 
         #note that projection_nin = 2048 for resnet50 (matches paper)
         self.projection = nn.Sequential(
@@ -80,7 +83,6 @@ class PixPro(nn.Module):
         super(PixPro, self).__init__()
 
         #create the encoder and momentum encoder
-        backbone = backbone()
         self.encoder = Encoder(backbone)
         self.mom_encoder = deepcopy(self.encoder)
 
@@ -117,6 +119,8 @@ class PixPro(nn.Module):
 
         view1_grid = self.grid_downsample(view1_grid)
         view2_grid = self.grid_downsample(view2_grid)
+        
+        print(y1.size(), y2.size(), z1.size(), z2.size(), view1_grid.size(), view2_grid.size())
 
         return y1, y2, z1, z2, view1_grid, view2_grid
 
@@ -130,7 +134,6 @@ def grid_distances(grid1, grid2):
     x_distances = grid1[:, 1] - grid2[:, 1]
 
     return torch.sqrt(y_distances ** 2 + x_distances ** 2)
-
 
 class ConsistencyLoss(nn.Module):
     def __init__(self, distance_thr=0.7):
@@ -157,8 +160,7 @@ class ConsistencyLoss(nn.Module):
         view1_distances = distances / view1_bin[:, None, None]
         view2_distances = distances / view2_bin[:, None, None]
 
-        #???average over pixel locations first then over images
-        #in the batch (B, H * W, H * W)???
+        #average only over matched "pixels"
         view1_similarity = self.cosine_sim(y1[..., :, None], z2[..., None, :])
         view1_mask = view1_distances <= self.distance_thr
         view1_loss = view1_similarity.masked_select(view1_mask).mean()
