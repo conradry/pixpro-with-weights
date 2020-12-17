@@ -120,8 +120,6 @@ class PixPro(nn.Module):
         view1_grid = self.grid_downsample(view1_grid)
         view2_grid = self.grid_downsample(view2_grid)
         
-        print(y1.size(), y2.size(), z1.size(), z2.size(), view1_grid.size(), view2_grid.size())
-
         return y1, y2, z1, z2, view1_grid, view2_grid
 
 def grid_distances(grid1, grid2):
