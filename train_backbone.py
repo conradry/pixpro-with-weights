@@ -27,12 +27,14 @@ import torch.utils.data.distributed
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
-from torchlars import LARS
+
+#DOESN'T SEEM TO WORK WITH DISTRIBUTED TRAINING
+#from torchlars import LARS
 
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
-from pixpro.loader import ContrastData
+from pixpro.data import ContrastData
 from pixpro.model import PixPro, ConsistencyLoss
 
 model_names = sorted(name for name in models.__dict__
@@ -42,6 +44,8 @@ model_names = sorted(name for name in models.__dict__
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 parser.add_argument('data', metavar='DIR',
                     help='path to dataset')
+parser.add_argument('model_dir', metavar='MODEL_DIR',
+                    help='path to save models')
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                     choices=model_names,
                     help='model architecture: ' +
@@ -93,7 +97,7 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
 #pixpro arguments
 parser.add_argument('--pixpro-mom', default=0.99, type=float,
                     help='initialization momentum for momentum encoder updates')
-parser.add_argument('--ppm-layers', default=1, type=int, choice=[0, 1, 2],
+parser.add_argument('--ppm-layers', default=1, type=int, choices=[0, 1, 2],
                     help='number of conv layers in PPM')
 parser.add_argument('--ppm-gamma', default=2, type=float,
                     help='pixpro gamma value for PPM')
@@ -103,6 +107,9 @@ parser.add_argument('--pixpro-t', default=0.7, type=float,
 
 def main():
     args = parser.parse_args()
+    
+    if not os.path.isdir(args.model_dir):
+        os.makedirs(args.model_dir)
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -179,7 +186,7 @@ def main_worker(gpu, ngpus_per_node, args):
             # ourselves based on the total number of GPUs we have
             args.batch_size = int(args.batch_size / ngpus_per_node)
             args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
-            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
         else:
             model.cuda()
             # DistributedDataParallel will divide and allocate batch_size to all
@@ -199,13 +206,13 @@ def main_worker(gpu, ngpus_per_node, args):
     #define loss criterion and optimizer
     criterion = ConsistencyLoss(distance_thr=args.pixpro_t).cuda(args.gpu)
 
-    #NOT CONFIDENT ABOUT THIS OPTIMIZER FOR PYTORCH 1.7
-    #CREATED FOR PYTORCH 1.1
-    base_optimizer = torch.optim.SGD(
+    
+    #TODO Implement LARS!!!
+    optimizer = torch.optim.SGD(
         model.parameters(), lr=args.lr, momentum=args.momentum,
         weight_decay=args.weight_decay
     )
-    optimizer = LARS(optimizer=base_optimizer, eps=1e-8, trust_coef=0.001)
+    #optimizer = LARS(optimizer=base_optimizer, eps=1e-8, trust_coef=0.001)
 
     # optionally resume from a checkpoint
     if args.resume:
@@ -266,7 +273,7 @@ def main_worker(gpu, ngpus_per_node, args):
         num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
 
     #encoder momentum is updated by STEP and not EPOCH
-    args.train_steps = (args.epochs - args.start_epoch) * len(train_loader)
+    args.train_steps = args.epochs * len(train_loader)
     args.current_step = args.start_epoch * len(train_loader)
     
     for epoch in range(args.start_epoch, args.epochs):
@@ -285,7 +292,7 @@ def main_worker(gpu, ngpus_per_node, args):
                 'arch': args.arch,
                 'state_dict': model.state_dict(),
                 'optimizer' : optimizer.state_dict(),
-            }, is_best=False, filename='checkpoint_{:04d}.pth.tar'.format(epoch))
+            }, is_best=False, filename=os.path.join(args.model_dir, 'checkpoint_{:04d}.pth.tar'.format(epoch)))
 
 def train(train_loader, model, criterion, optimizer, epoch, args):
     batch_time = AverageMeter('Time', ':6.3f')
@@ -294,7 +301,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
 
     progress = ProgressMeter(
         len(train_loader),
-        [batch_time, data_time, losses, top1, top5],
+        [batch_time, data_time, losses],
         prefix="Epoch: [{}]".format(epoch)
     )
 
@@ -303,13 +310,6 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
 
     end = time.time()
     for i, batch in enumerate(train_loader):
-        output = {
-            'fpath': fpath,
-            'view1': view1,
-            'view1_grid': torch.from_numpy(view1_grid).permute(2, 0, 1),
-            'view2': view2,
-            'view2_grid': torch.from_numpy(view2_grid).permute(2, 0, 1)
-        }
         view1 = batch['view1']
         view1_grid = batch['view1_grid']
         view2 = batch['view2']
@@ -325,7 +325,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
             view2_grid = view2_grid.cuda(args.gpu, non_blocking=True)
 
         # compute output and loss
-        output = model(view1, view2, view1_grid, v2_grid)
+        output = model(view1, view2, view1_grid, view2_grid)
         loss = criterion(*output)
 
         # avg loss from batch size
@@ -339,7 +339,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         # update current step and encoder momentum
         args.current_step += 1
         adjust_encoder_momentum(model, args)
-
+        
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
@@ -377,7 +377,6 @@ class AverageMeter(object):
         fmtstr = '{name} {val' + self.fmt + '} ({avg' + self.fmt + '})'
         return fmtstr.format(**self.__dict__)
 
-
 class ProgressMeter(object):
     def __init__(self, num_batches, meters, prefix=""):
         self.batch_fmtstr = self._get_batch_fmtstr(num_batches)
@@ -397,7 +396,7 @@ class ProgressMeter(object):
 def adjust_encoder_momentum(model, args):
     base_mom = args.pixpro_mom
     new_mom = 1 - (1 - base_mom) * (math.cos(math.pi * args.current_step / args.train_steps) + 1) / 2
-    model.momentum = new_mom
+    model.module.momentum = new_mom
 
 def adjust_learning_rate(optimizer, epoch, args):
     """Decay the learning rate based on schedule"""
