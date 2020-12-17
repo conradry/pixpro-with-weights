@@ -265,6 +265,10 @@ def main_worker(gpu, ngpus_per_node, args):
         train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
         num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
 
+    #encoder momentum is updated by STEP and not EPOCH
+    args.train_steps = (args.epochs - args.start_epoch) * len(train_loader)
+    args.current_step = args.start_epoch * len(train_loader)
+    
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
@@ -282,7 +286,6 @@ def main_worker(gpu, ngpus_per_node, args):
                 'state_dict': model.state_dict(),
                 'optimizer' : optimizer.state_dict(),
             }, is_best=False, filename='checkpoint_{:04d}.pth.tar'.format(epoch))
-
 
 def train(train_loader, model, criterion, optimizer, epoch, args):
     batch_time = AverageMeter('Time', ':6.3f')
@@ -332,6 +335,10 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        
+        # update current step and encoder momentum
+        args.current_step += 1
+        adjust_encoder_momentum(model, args)
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -387,6 +394,10 @@ class ProgressMeter(object):
         fmt = '{:' + str(num_digits) + 'd}'
         return '[' + fmt + '/' + fmt.format(num_batches) + ']'
 
+def adjust_encoder_momentum(model, args):
+    base_mom = args.pixpro_mom
+    new_mom = 1 - (1 - base_mom) * (math.cos(math.pi * args.current_step / args.train_steps) + 1) / 2
+    model.momentum = new_mom
 
 def adjust_learning_rate(optimizer, epoch, args):
     """Decay the learning rate based on schedule"""
@@ -395,7 +406,6 @@ def adjust_learning_rate(optimizer, epoch, args):
     lr *= 0.5 * (1. + math.cos(math.pi * epoch / args.epochs))
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
-
 
 def accuracy(output, target, topk=(1,)):
     """Computes the accuracy over the k top predictions for the specified values of k"""
