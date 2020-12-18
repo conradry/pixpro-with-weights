@@ -164,7 +164,6 @@ class ConsistencyLoss(nn.Module):
         view1_similarity = self.cosine_sim(y1[..., :, None], z2[..., None, :])
         view2_similarity = self.cosine_sim(z1[..., :, None], y2[..., None, :])
         similarities = view1_similarity + view2_similarity
-        simk = torch.clone(similarities)
         
         #only consider points that are matches for both views
         view1_mask = view1_distances <= self.distance_thr
@@ -184,4 +183,4 @@ class ConsistencyLoss(nn.Module):
         matched_images = (matches_per_image > 0).sum()
         similarities = similarities.sum() / matched_images #( )
         
-        return -similarities, simk
+        return -similarities
