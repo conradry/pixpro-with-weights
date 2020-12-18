@@ -29,7 +29,7 @@ import torchvision.datasets as datasets
 import torchvision.models as models
 
 #DOESN'T SEEM TO WORK WITH DISTRIBUTED TRAINING
-#from torchlars import LARS
+from LARC import LARC
 
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
@@ -206,13 +206,13 @@ def main_worker(gpu, ngpus_per_node, args):
     #define loss criterion and optimizer
     criterion = ConsistencyLoss(distance_thr=args.pixpro_t).cuda(args.gpu)
 
-    
-    #TODO Implement LARS!!!
-    optimizer = torch.optim.SGD(
+    base_optimizer = torch.optim.SGD(
         model.parameters(), lr=args.lr, momentum=args.momentum,
         weight_decay=args.weight_decay
     )
-    #optimizer = LARS(optimizer=base_optimizer, eps=1e-8, trust_coef=0.001)
+    
+    #LARC without clipping == LARS
+    optimizer = LARC(optimizer=base_optimizer, clip=False)
 
     # optionally resume from a checkpoint
     if args.resume:

@@ -28,7 +28,7 @@ class PPM(nn.Module):
         self.transform = nn.Sequential(*layers)
         self.gamma = gamma
         self.cosine_sim = nn.CosineSimilarity(dim=1)
-
+        
     def forward(self, x):
         #(B, C, H, W, 1, 1) x (B, C, 1, 1, H, W) --> (B, H, W, H, W)
         #relu is same as max(sim, 0) but differentiable
@@ -77,33 +77,30 @@ class PixPro(nn.Module):
         backbone,
         momentum=0.99,
         ppm_layers=1,
-        ppm_gamma=0.2,
+        ppm_gamma=2,
         downsampling=32
     ):
         super(PixPro, self).__init__()
 
         #create the encoder and momentum encoder
         self.encoder = Encoder(backbone)
-        self.mom_encoder = deepcopy(self.encoder)
+        self.mom_encoder = Encoder(backbone)
+
+        #copy and turn off gradients
+        for param, mom_param in zip(self.encoder.parameters(), self.mom_encoder.parameters()):
+            mom_param.data.copy_(param.data)
+            mom_param.requires_grad = False
 
         #hardcoded: encoder outputs 256
         self.ppm = PPM(256, gamma=ppm_gamma, nlayers=ppm_layers)
 
-        #copy parameters from the encoder to momentum encoder
-        #and turn off gradients
-        for param in self.mom_encoder.parameters():
-            param.requires_grad = False
-
         self.grid_downsample = nn.AvgPool2d(downsampling, stride=downsampling)
-
         self.momentum = momentum
-        #momentum = 1 − (1 − momentum) * (cos(pi * k / K) + 1) / 2 #k current step
 
     @torch.no_grad()
     def _update_mom_encoder(self):
         for param, mom_param in zip(self.encoder.parameters(), self.mom_encoder.parameters()):
             mom_param.data = mom_param.data * self.momentum + param.data * (1. - self.momentum)
-
 
     def forward(self, view1, view2, view1_grid, view2_grid):
         #pass each view through each encoder
@@ -117,9 +114,9 @@ class PixPro(nn.Module):
             z1 = self.mom_encoder(view1)
             z2 = self.mom_encoder(view2)
 
-        view1_grid = self.grid_downsample(view1_grid)
-        view2_grid = self.grid_downsample(view2_grid)
-        
+            view1_grid = self.grid_downsample(view1_grid)
+            view2_grid = self.grid_downsample(view2_grid)
+                    
         return y1, y2, z1, z2, view1_grid, view2_grid
 
 def grid_distances(grid1, grid2):
@@ -152,19 +149,38 @@ class ConsistencyLoss(nn.Module):
 
         #determine normalization factors for view1 and view2
         #(i.e. distance between "feature map bins")
+        #(B,)
         view1_bin = torch.norm(view1_grid[..., 1, 1] - view1_grid[..., 0, 0], dim=-1)
         view2_bin = torch.norm(view2_grid[..., 1, 1] - view2_grid[..., 0, 0], dim=-1)
 
+        #(B, H * W, H * W)
         view1_distances = distances / view1_bin[:, None, None]
         view2_distances = distances / view2_bin[:, None, None]
-
-        #average only over matched "pixels"
+        
+        #(B, C, H * W, 1) x (B, C, 1, H * W) --> (B, H * W, H * W)
+        #important to keep view1 outputs (y1 and z1) as first items
+        #in the cosine sim measurement because distances tensor
+        #has that ordering fixed
         view1_similarity = self.cosine_sim(y1[..., :, None], z2[..., None, :])
+        view2_similarity = self.cosine_sim(z1[..., :, None], y2[..., None, :])
+        similarities = view1_similarity + view2_similarity
+        
+        #only consider points that are matches for both views
         view1_mask = view1_distances <= self.distance_thr
-        view1_loss = view1_similarity.masked_select(view1_mask).mean()
-
-        view2_similarity = self.cosine_sim(y2[..., :, None], z1[..., None, :])
         view2_mask = view2_distances <= self.distance_thr
-        view2_loss = view2_similarity.masked_select(view2_mask).mean()
-
-        return -1 * (view1_loss + view2_loss)
+        mask = torch.logical_and(view1_mask, view2_mask)
+        
+        #mask-out non-matches with zeros
+        similarities = torch.where(mask, similarities, torch.zeros_like(similarities))
+        matches_per_image = mask.sum(dim=(-1, -2)) #(B,)
+        
+        #average over images
+        similarities = similarities.sum(dim=(-1, -2)).masked_select(matches_per_image > 0)
+        matches_per_image = matches_per_image.masked_select(matches_per_image > 0) #(b,)
+        similarities = similarities / matches_per_image #(B,)
+        
+        #average over batch
+        matched_images = (matches_per_image > 0).sum()
+        similarities = similarities.sum() / matched_images #( )
+        
+        return -similarities
