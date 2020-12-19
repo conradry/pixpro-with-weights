@@ -41,9 +41,7 @@ class PPM(nn.Module):
 
         #use einsum and skip all the transposes
         #and matrix multiplies
-        y = torch.einsum('bijhw, bchw -> bcij', s, gx)
-
-        return x
+        return torch.einsum('bijhw, bchw -> bcij', s, gx)
 
 class Encoder(nn.Module):
     def __init__(self, backbone):
@@ -68,8 +66,7 @@ class Encoder(nn.Module):
         )
 
     def forward(self, x):
-        x = self.backbone(x)
-        return self.projection(x)
+        return self.projection(self.backbone(x))
 
 class PixPro(nn.Module):
     def __init__(
@@ -84,11 +81,10 @@ class PixPro(nn.Module):
 
         #create the encoder and momentum encoder
         self.encoder = Encoder(backbone)
-        self.mom_encoder = Encoder(backbone)
+        self.mom_encoder = deepcopy(self.encoder)
 
-        #copy and turn off gradients
-        for param, mom_param in zip(self.encoder.parameters(), self.mom_encoder.parameters()):
-            mom_param.data.copy_(param.data)
+        #turn off gradients
+        for mom_param in self.mom_encoder.parameters():
             mom_param.requires_grad = False
 
         #hardcoded: encoder outputs 256
