@@ -32,6 +32,7 @@ class ContrastData(Dataset):
     def __getitem__(self, idx):
         fpath = os.path.join(self.imdir, self.fnames[idx])
         image = cv2.imread(fpath)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
         y = np.arange(0, image.shape[0], dtype=np.float32)
         x = np.arange(0, image.shape[1], dtype=np.float32)
