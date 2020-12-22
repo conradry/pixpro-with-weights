@@ -28,7 +28,11 @@ Implementations of the dataloader, model and train_backbone script are complete 
 
 Hyperparameters and training schedules have been reproduced with as much fidelity to the original publication as possible.
 
-On an 8 GPU machine, run:
+If using conda, setup a new environment with required dependencies with:
+
+```conda env create -f environment.yml```
+
+Then, on an 8 GPU machine, run:
 
 ```
 python train_backbone.py {data_directory} {save_directory} -a resnet50 -b 1024 --lr 4 \
@@ -38,4 +42,6 @@ python train_backbone.py {data_directory} {save_directory} -a resnet50 -b 1024 -
 
 Where {data_directory} should be a path to a folder containing ImageNet training data.
 
-For smaller batch sizes scale the learning rate by ```(lr = base_lr x batch_size/256)``` where ```base_lr=1```.
+### Note about smaller batch sizes
+
+Scale the learning rate by ```lr = base_lr x batch_size/256``` where ```base_lr=1```. Results where not reported in the paper for smaller batch sizes; however, assuming that it behaves like the BYOL algorithm, there shouldn't be too much of a loss in performance. In addition to scaling the learning rate for smaller batches, BYOL also increases the starting momentum for the encoder. For PixPro the default momentum for a batch size of 1024 is 0.99, for a batch size of 256 it may be better to use a momentum closer to 0.995 (i.e. ```--pixpro-mom 0.995```).
