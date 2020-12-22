@@ -1,0 +1,8 @@
+name: pixpro
+channels:
+  - defaults
+dependencies:
+  - cudatoolkit=10.2
+  - pytorch
+  - torchvision
+  - albumentations
