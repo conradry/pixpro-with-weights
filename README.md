@@ -21,6 +21,7 @@ Implementations of the dataloader, model and train_backbone script are complete 
 - [x] Momentum encoder's momentum schedule from BYOL (0.99 -> 1 during training)
 - [x] LARS optimizer
 - [x] Distributed training script for backbone network (e.g. resnet50)
+- [x] Support for mixed precision training
 - [ ] Additional instance level loss
 - [ ] Pre-trained ResNet50 backbone model
 - [ ] Pre-trained FPN
@@ -40,7 +41,7 @@ python train_backbone.py {data_directory} {save_directory} -a resnet50 -b 1024 -
 --world-size 1 --rank 0 --momentum 0.0
 ```
 
-Where {data_directory} should be a path to a folder containing ImageNet training data.
+Where {data_directory} should be a path to a folder containing ImageNet training data. To train with mixed precision add the ```--fp16``` flag.
 
 ### Note about smaller batch sizes
 

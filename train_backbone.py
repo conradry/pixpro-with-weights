@@ -28,8 +28,10 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
 
-#DOESN'T SEEM TO WORK WITH DISTRIBUTED TRAINING
 from LARC import LARC
+
+from torch.cuda.amp import autocast
+from torch.cuda.amp import GradScaler
 
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
@@ -104,6 +106,8 @@ parser.add_argument('--ppm-gamma', default=2, type=float,
 parser.add_argument('--pixpro-t', default=0.7, type=float,
                     help='normalized distance threshold for loss calculation')
 
+#use mixed precision
+parser.add_argument('--fp16', action='store_true', help='Use mixed precision for training')
 
 def main():
     args = parser.parse_args()
@@ -276,6 +280,11 @@ def main_worker(gpu, ngpus_per_node, args):
     args.train_steps = args.epochs * len(train_loader)
     args.current_step = args.start_epoch * len(train_loader)
     
+    if args.fp16:
+        scaler = GradScaler()
+    else:
+        scaler = None
+    
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
@@ -283,7 +292,7 @@ def main_worker(gpu, ngpus_per_node, args):
         adjust_learning_rate(optimizer, epoch, args)
 
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch, args)
+        train(train_loader, model, criterion, optimizer, scaler, epoch, args)
 
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                 and args.rank % ngpus_per_node == 0):
@@ -294,7 +303,7 @@ def main_worker(gpu, ngpus_per_node, args):
                 'optimizer' : optimizer.state_dict(),
             }, is_best=False, filename=os.path.join(args.model_dir, 'checkpoint_{:04d}.pth.tar'.format(epoch)))
 
-def train(train_loader, model, criterion, optimizer, epoch, args):
+def train(train_loader, model, criterion, optimizer, scaler, epoch, args):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
@@ -324,17 +333,25 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
             view2 = view2.cuda(args.gpu, non_blocking=True)
             view2_grid = view2_grid.cuda(args.gpu, non_blocking=True)
 
+        optimizer.zero_grad()
+        
         # compute output and loss
-        output = model(view1, view2, view1_grid, view2_grid)
-        loss = criterion(*output)
+        if args.fp16:
+            with autocast():
+                output = model(view1, view2, view1_grid, view2_grid)
+                loss = criterion(*output)
+                
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            output = model(view1, view2, view1_grid, view2_grid)
+            loss = criterion(*output)
+            loss.backward()
+            optimizer.step()
 
         # avg loss from batch size
         losses.update(loss.item(), view1.size(0))
-
-        # compute gradient and do SGD step
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
         
         # update current step and encoder momentum
         args.current_step += 1
