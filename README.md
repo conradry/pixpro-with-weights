@@ -38,7 +38,7 @@ Then, on an 8 GPU machine, run:
 ```
 python train_backbone.py {data_directory} {save_directory} -a resnet50 -b 1024 --lr 4 \
 --dist-url 'tcp://localhost:10001' --multiprocessing-distributed \
---world-size 1 --rank 0 --momentum 0.0
+--world-size 1 --rank 0 --momentum 0.9 --fp16
 ```
 
 Where {data_directory} should be a path to a folder containing ImageNet training data. To train with mixed precision add the ```--fp16``` flag.
