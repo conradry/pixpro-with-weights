@@ -216,7 +216,8 @@ def main_worker(gpu, ngpus_per_node, args):
     )
     
     #LARC without clipping == LARS
-    optimizer = LARC(optimizer=base_optimizer, clip=False)
+    #lower trust_coefficient and clipping prevent NaNs
+    optimizer = LARC(optimizer=base_optimizer, clip=True, trust_coefficient=1e-3)
 
     # optionally resume from a checkpoint
     if args.resume:
