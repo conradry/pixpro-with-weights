@@ -14,6 +14,8 @@ First pass at pre-training a model is complete. Results fall short of those repo
 
 <a href="https://www.dropbox.com/s/zu3r36q63jk1yvp/pixpro100_bsz512_IN1M.tar.pth?dl=0">Download weights</a>
 
+Results from VOC2007-test:
+
 <table><tbody>
 <!-- START TABLE -->
 <!-- TABLE HEADER -->
