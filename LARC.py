@@ -1,5 +1,12 @@
 """
-Copied without modificiation from https://github.com/NVIDIA/apex/blob/master/apex/parallel/LARC.py
+Copied with modificiation from https://github.com/NVIDIA/apex/blob/master/apex/parallel/LARC.py
+
+Modifications:
+--------------
+
+1. Added a condition in step() to not adapt the lr for parameter groups
+with 'adapt_lr' == False.
+
 """
 
 import torch
@@ -9,10 +16,10 @@ from torch.nn.parameter import Parameter
 class LARC(object):
     """
     :class:`LARC` is a pytorch implementation of both the scaling and clipping variants of LARC,
-    in which the ratio between gradient and parameter magnitudes is used to calculate an adaptive 
+    in which the ratio between gradient and parameter magnitudes is used to calculate an adaptive
     local learning rate for each individual parameter. The algorithm is designed to improve
     convergence of large batch training.
-     
+
     See https://arxiv.org/abs/1708.03888 for calculation of the local learning rate.
 
     In practice it modifies the gradients of parameters as a proxy for modifying the learning rate
@@ -40,7 +47,13 @@ class LARC(object):
         eps: epsilon kludge to help with numerical stability while calculating adaptive_lr
     """
 
-    def __init__(self, optimizer, trust_coefficient=0.02, clip=True, eps=1e-8):
+    def __init__(
+        self,
+        optimizer,
+        trust_coefficient=1e-3,
+        clip=False,
+        eps=1e-8
+    ):
         self.optim = optimizer
         self.trust_coefficient = trust_coefficient
         self.eps = eps
@@ -66,7 +79,7 @@ class LARC(object):
     @param_groups.setter
     def param_groups(self, value):
         self.optim.param_groups = value
-    
+
     def state_dict(self):
         return self.optim.state_dict()
 
@@ -87,9 +100,17 @@ class LARC(object):
                 weight_decay = group['weight_decay'] if 'weight_decay' in group else 0
                 weight_decays.append(weight_decay)
                 group['weight_decay'] = 0
+
+                #check if adapt_lr flag exists and if it's False
+                #don't adapt the lr for those parameters
+                if 'adapt_lr' in group:
+                    if group['adapt_lr'] is False:
+                        continue #go to next group
+
                 for p in group['params']:
                     if p.grad is None:
                         continue
+
                     param_norm = torch.norm(p.data)
                     grad_norm = torch.norm(p.grad.data)
 

@@ -111,7 +111,7 @@ parser.add_argument('--fp16', action='store_true', help='Use mixed precision for
 
 def main():
     args = parser.parse_args()
-    
+
     if not os.path.isdir(args.model_dir):
         os.makedirs(args.model_dir)
 
@@ -210,14 +210,7 @@ def main_worker(gpu, ngpus_per_node, args):
     #define loss criterion and optimizer
     criterion = ConsistencyLoss(distance_thr=args.pixpro_t).cuda(args.gpu)
 
-    base_optimizer = torch.optim.SGD(
-        model.parameters(), lr=args.lr, momentum=args.momentum,
-        weight_decay=args.weight_decay
-    )
-    
-    #LARC without clipping == LARS
-    #lower trust_coefficient and clipping prevent NaNs
-    optimizer = LARC(optimizer=base_optimizer, clip=True, trust_coefficient=1e-3)
+    optimizer = configure_optimizer(model, args)
 
     # optionally resume from a checkpoint
     if args.resume:
@@ -280,12 +273,12 @@ def main_worker(gpu, ngpus_per_node, args):
     #encoder momentum is updated by STEP and not EPOCH
     args.train_steps = args.epochs * len(train_loader)
     args.current_step = args.start_epoch * len(train_loader)
-    
+
     if args.fp16:
         scaler = GradScaler()
     else:
         scaler = None
-    
+
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
@@ -335,13 +328,13 @@ def train(train_loader, model, criterion, optimizer, scaler, epoch, args):
             view2_grid = view2_grid.cuda(args.gpu, non_blocking=True)
 
         optimizer.zero_grad()
-        
+
         # compute output and loss
         if args.fp16:
             with autocast():
                 output = model(view1, view2, view1_grid, view2_grid)
                 loss = criterion(*output)
-                
+
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -353,11 +346,11 @@ def train(train_loader, model, criterion, optimizer, scaler, epoch, args):
 
         # avg loss from batch size
         losses.update(loss.item(), view1.size(0))
-        
+
         # update current step and encoder momentum
         args.current_step += 1
         adjust_encoder_momentum(model, args)
-        
+
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
@@ -370,6 +363,54 @@ def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     torch.save(state, filename)
     if is_best:
         shutil.copyfile(filename, 'model_best.pth.tar')
+
+def configure_optimizer(model, args):
+    """
+    Takes an optimizer and separates parameters into two groups
+    that either use weight decay or are exempt.
+
+    Only BatchNorm parameters and biases are excluded.
+    """
+    decay = set()
+    no_decay = set()
+
+    blacklist = (nn.BatchNorm2d,)
+    for mn, m in model.named_modules():
+        for pn, p in m.named_parameters(recurse=False):
+            full_name = '%s.%s' % (mn, pn) if mn else pn
+
+            if full_name.endswith('bias'):
+                no_decay.add(full_name)
+            elif full_name.endswith('weight') and isinstance(m, blacklist):
+                no_decay.add(full_name)
+            else:
+                decay.add(full_name)
+
+    param_dict = {pn: p for pn, p in model.named_parameters()}
+    inter_params = decay & no_decay
+    union_params = decay | no_decay
+    assert(len(inter_params) == 0), "Overlapping decay and no decay"
+    assert(len(param_dict.keys() - union_params) == 0), "Missing decay parameters"
+
+    decay_params = [param_dict[pn] for pn in sorted(list(decay))]
+    no_decay_params = [param_dict[pn] for pn in sorted(list(no_decay))]
+
+    #the adapt_lr key tells LARS not to adapt the lr (see 'LARC.py')
+    param_groups = [
+        {"params": decay_params, "weight_decay": args.weight_decay, "adapt_lr": True},
+        {"params": no_decay_params, "weight_decay": 0., "adapt_lr": False}
+    ]
+
+    base_optimizer = SGD(
+        param_groups, args.lr=2, args.momentum=0.9
+    )
+
+    #LARC without clipping == LARS
+    #lower trust_coefficient to match SimCLR and BYOL
+    #(too high of a trust_coefficient leads to NaN losses!)
+    optimizer = LARC(optimizer=base_optimizer, trust_coefficient=1e-3)
+
+    return optimizer
 
 
 class AverageMeter(object):

@@ -8,9 +8,11 @@ Unofficial implementation of [Propagate Yourself: Exploring Pixel-Level Consiste
 </figure>
 
 
-## Pretrained Weights
+## Pre-trained Weights
 
-First pass at pre-training a model is complete. Results fall short of those reported in the PixPro paper, but are on par with other unsupervised pre-training algorithms like MoCo and SimCLR.
+First run at pre-training a model is complete. Results fall short of those reported in the PixPro paper, but are on par with other unsupervised pre-training algorithms like MoCo and SimCLR.
+
+<b>Update:</b> This model was trained without excluding BatchNorm parameters and biases from weight decay or LARS adaptation. This omission has been corrected; it may explain the suboptimal performance. TBD.
 
 <a href="https://www.dropbox.com/s/zu3r36q63jk1yvp/pixpro100_bsz512_IN1M.tar.pth?dl=0">Download weights</a>
 
@@ -80,9 +82,7 @@ At least some of this discrepancy may be due to differences in pre-training hype
 </tr>
 </tbody></table>
 
-And in finetuning hyperparameters as well, where batch size was again cut in half to accommodate training on 4 GPUs.
-
-The training loss has expected behavior until epoch ~80 when it starts increasing slightly. This could be a result of using too large of an initial encoder momentum.
+The training loss had expected behavior until epoch ~80 when it starts increasing slightly.
 
 <figure>
   <img src="./images/pixpro100_bsz512_loss.png"></img>
