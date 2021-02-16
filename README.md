@@ -12,11 +12,11 @@ Unofficial implementation of [Propagate Yourself: Exploring Pixel-Level Consiste
 
 First run at pre-training a model is complete. Results fall short of those reported in the PixPro paper, but are on par with other unsupervised pre-training algorithms like MoCo and SimCLR.
 
-<b>Update:</b> This model was trained without excluding BatchNorm parameters and biases from weight decay or LARS adaptation. This omission has been corrected; it may explain the suboptimal performance. TBD.
+<a href="https://www.dropbox.com/s/5vqscsb78p9lg1e/pixpro100_bsz512_IN1M.tar.pth?dl=0">Download weights</a>
 
-<a href="https://www.dropbox.com/s/zu3r36q63jk1yvp/pixpro100_bsz512_IN1M.tar.pth?dl=0">Download weights</a>
+<b>Results from VOC2007-test:</b>
 
-Results from VOC2007-test:
+Note: I don't have access to an 8 GPU machine to run training with the correct hyperparameters. These results are from training a model with a quarter of the desired batch size (32 instead of 128). While Detectron2 correctly scales the learning rate, it does not correctly scale the number of training iterations. More HPO is required to reproduce the results of the paper, though I'm reasonably confident in the current implementation of the PixPro algorithm. Please open an issue if you'd like to contribute.
 
 <table><tbody>
 <!-- START TABLE -->
@@ -56,7 +56,9 @@ Results from VOC2007-test:
 </tr>
 </tbody></table>
 
-At least some of this discrepancy may be due to differences in pre-training hyperparameters.
+<b>Pretraining hyperparameters:</b>
+
+Again, the choice of hyperparameters is limited by access to computational resources.
 
 <table><tbody>
 <!-- START TABLE -->
@@ -69,7 +71,7 @@ At least some of this discrepancy may be due to differences in pre-training hype
 <!-- TABLE BODY -->
 <tr><td align="left"><b>PixPro, 100ep (this repo)</b></td>
 <td align="center"><b>512</b></td>
-<td align="center"><b>0.995</b></td>
+<td align="center"><b>0.9934</b></td>
 <td align="center"><b>100</b></td>
 <td align="center"><b>4</b></td>
 </tr>
@@ -82,7 +84,7 @@ At least some of this discrepancy may be due to differences in pre-training hype
 </tr>
 </tbody></table>
 
-The training loss had expected behavior until epoch ~80 when it starts increasing slightly.
+<b>PixPro Training Loss</b>
 
 <figure>
   <img src="./images/pixpro100_bsz512_loss.png"></img>
@@ -122,7 +124,3 @@ python train_backbone.py {data_directory} {save_directory} -a resnet50 -b 1024 -
 ```
 
 Where {data_directory} should be a path to a folder containing ImageNet training data. To train with mixed precision add the ```--fp16``` flag.
-
-### Note about smaller batch sizes
-
-Scale the learning rate by ```lr = base_lr x batch_size/256``` where ```base_lr=1```. Results where not reported in the paper for smaller batch sizes; however, assuming that it behaves like the BYOL algorithm, there shouldn't be too much of a loss in performance. In addition to scaling the learning rate for smaller batches, BYOL also increases the starting momentum for the encoder. For PixPro the default momentum for a batch size of 1024 is 0.99, for a batch size of 256 it may be better to use a momentum closer to 0.995 (i.e. ```--pixpro-mom 0.995```).
