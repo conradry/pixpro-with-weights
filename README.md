@@ -54,19 +54,21 @@ Note: I don't have access to an 8 GPU machine to run training with the correct h
 
 ### Pretraining results
 
-Again, the choice of hyperparameters is limited by access to computational resources.
+Again, the choice of hyperparameters is limited by access to GPUs.
 
 <table><tbody>
 <!-- START TABLE -->
 <!-- TABLE HEADER -->
 <th valign="bottom">source</th>
 <th valign="bottom">batch size</th>
+<th valign="bottom">lr</th>
 <th valign="bottom">encoder momentum</th>
 <th valign="bottom">epochs</th>
 <th valign="bottom">number of gpus</th>
 <!-- TABLE BODY -->
 <tr><td align="left"><b>PixPro, 100ep (this repo)</b></td>
 <td align="center"><b>512</b></td>
+<td align="center"><b>2</b></td>
 <td align="center"><b>0.9934</b></td>
 <td align="center"><b>100</b></td>
 <td align="center"><b>4</b></td>
@@ -74,6 +76,7 @@ Again, the choice of hyperparameters is limited by access to computational resou
 </tr>
 <tr><td align="left">PixPro, 100ep (reported)</td>
 <td align="center">1024</td>
+<td align="center">4</td>
 <td align="center">0.99</td>
 <td align="center">100</td>
 <td align="center">8</td>
