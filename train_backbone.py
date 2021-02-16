@@ -402,7 +402,7 @@ def configure_optimizer(model, args):
     ]
 
     base_optimizer = SGD(
-        param_groups, args.lr=2, args.momentum=0.9
+        param_groups, lr=args.lr, momentum=args.momentum
     )
 
     #LARC without clipping == LARS
