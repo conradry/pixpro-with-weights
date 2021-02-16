@@ -10,10 +10,6 @@ Unofficial implementation of [Propagate Yourself: Exploring Pixel-Level Consiste
 
 ## Pre-trained Weights
 
-First run at pre-training a model is complete. Results fall short of those reported in the PixPro paper, but are on par with other unsupervised pre-training algorithms like MoCo and SimCLR.
-
-<a href="https://www.dropbox.com/s/5vqscsb78p9lg1e/pixpro100_bsz512_IN1M.tar.pth?dl=0">Download weights</a>
-
 <b>Results from VOC2007-test:</b>
 
 Note: I don't have access to an 8 GPU machine to run training with the correct hyperparameters. These results are from training a model with a quarter of the desired batch size (32 instead of 128). While Detectron2 correctly scales the learning rate, it does not correctly scale the number of training iterations. More HPO is required to reproduce the results of the paper, though I'm reasonably confident in the current implementation of the PixPro algorithm. Please open an issue if you'd like to contribute.
@@ -89,6 +85,10 @@ Again, the choice of hyperparameters is limited by access to computational resou
 <figure>
   <img src="./images/pixpro100_bsz512_loss.png"></img>
 </figure>
+
+<b>Pretrained Weights:</b>
+
+<a href="https://www.dropbox.com/s/5vqscsb78p9lg1e/pixpro100_bsz512_IN1M.tar.pth?dl=0">Download weights</a>
 
 
 ## Current Status
